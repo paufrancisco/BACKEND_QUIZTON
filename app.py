@@ -4,7 +4,8 @@ from flask_cors import CORS
 app = Flask(__name__)
 
 
-CORS(app)
+CORS(app, origins=["http://127.0.0.1:5500", "https://sample-render-hosting-1.onrender.com"])
+
 @app.route('/convert', methods=['POST'])
 def convert():
     # Static questions to return
