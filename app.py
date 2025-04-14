@@ -158,49 +158,27 @@ def process_pdf(file):
 
 @app.route('/convert', methods=['POST'])
 def convert():
-    text = ""
+    # Static questions to return
+    static_questions = [
+        {
+            'question': 'What is the capital of France?',
+            'options': ['Paris', 'London', 'Berlin', 'Rome'],
+            'answer': 'A'
+        },
+        {
+            'question': 'Which is the largest planet in our solar system?',
+            'options': ['Earth', 'Jupiter', 'Mars', 'Saturn'],
+            'answer': 'B'
+        },
+        {
+            'question': 'What is the chemical symbol for water?',
+            'options': ['O2', 'H2O', 'CO2', 'N2'],
+            'answer': 'B'
+        }
+    ]
 
-    if 'files[]' in request.files:
-        files = request.files.getlist('files[]')
-        for file in files:
-            if file.filename.endswith('.pdf'):
-                text += process_pdf(file)
-            elif file.filename.endswith('.txt'):
-                text += file.read().decode('utf-8')
-            else:
-                return jsonify({'error': 'Unsupported file type. Please upload PDF or TXT files.'}), 400
-    else:
-        text = request.form.get('text', '')
+    return jsonify({'quiz': {'Set-A': static_questions}})
 
-    text = clean_text(text)
-
-    if not text.strip():
-        return jsonify({'error': 'No text provided for conversion.'}), 400
-
-    question_type = request.form.get('questionType', 'mcq').lower()
-    num_sets = int(request.form.get('numSets', 0))
-
-    questions_by_set = {}
-
-    for i in range(1, num_sets + 1):
-        set_key = f"set-{i}"
-        num_questions = int(request.form.get(set_key, 0))
-
-        if num_questions < 1:
-            continue
-
-        if question_type == 'mcq':
-            questions = generate_mcq(text, num_questions)
-        elif question_type == 'fill_in_the_blanks':
-            questions = generate_fill_in_the_blank(text, num_questions)
-        elif question_type == 'true_false':
-            questions = generate_true_false(text, num_questions)
-        else:
-            return jsonify({'error': 'Invalid question type. Please choose mcq, fill_in_the_blanks, or true_false.'}), 400
-
-        questions_by_set[f"Set-{chr(64+i)}"] = questions
-
-    return jsonify({'quiz': questions_by_set})
 
 
  
