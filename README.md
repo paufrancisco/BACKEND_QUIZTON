@@ -1,2 +1,2 @@
-# sample_render_hosting
-simple calculator
+# Flask_project
+This is a simple flask project
