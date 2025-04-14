@@ -11,7 +11,8 @@ nltk.download('wordnet')
 from nltk.corpus import wordnet
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/*": {"origins": "*"}})
+
 
 nlp = spacy.load("en_core_web_sm")
 
