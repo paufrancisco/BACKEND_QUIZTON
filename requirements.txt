@@ -1,24 +1,5 @@
-
 Flask==3.0.3
 gunicorn==23.0.0
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# langchain
-
-# langchain-community
-# langchain-core
-
-# langchain-google-genai 
+spacy==3.7.2
+nltk==3.8.1
+PyPDF2==3.0.1
