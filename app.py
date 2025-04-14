@@ -203,20 +203,7 @@ def convert():
     return jsonify({'quiz': questions_by_set})
 
 
-@app.route('/submit-quiz', methods=['POST'])
-def submit_quiz():
-    data = request.json
-    scores = data.get('scores', {})
-    questions = data.get('questions', [])
-    correct_count = 0
-
-    for key, selected_answer in scores.items():
-        if key.isdigit() and int(key) < len(questions):
-            correct_answer = questions[int(key)]['answer']
-            if selected_answer == correct_answer:
-                correct_count += 1
-
-    return jsonify({'score': correct_count})
+ 
 
 if __name__ == '__main__':
     app.run(debug=True)
