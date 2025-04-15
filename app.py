@@ -1,12 +1,15 @@
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 import PyPDF2
-import io
 
 app = Flask(__name__)
 
 # Enable CORS for specific origins
-CORS(app, origins=["http://127.0.0.1:5500", "https://sample-render-hosting-1.onrender.com", "https://paufrancisco.github.io"])
+CORS(app, origins=[
+    "http://127.0.0.1:5500",
+    "https://sample-render-hosting-1.onrender.com",
+    "https://paufrancisco.github.io"
+])
 
 @app.route('/convert', methods=['POST'])
 def convert():
@@ -42,8 +45,7 @@ def convert():
             'Difficulty': difficulty,
             'Question Type': question_type,
             'Text from PDF': text[:500],  # Returning the first 500 characters of the extracted text as a preview
-            'Mode of Difficulty': f"The quiz has a difficulty level of {difficulty}.",
-            'Number of Questions': f"The total number of questions across all sets is {sum([set['questions'] for set in sets])}."
+            'Number of Questions': sum(set['questions'] for set in sets)
         }
     }
 
