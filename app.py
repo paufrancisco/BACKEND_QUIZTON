@@ -13,39 +13,74 @@ CORS(app, origins=[
 
 @app.route('/convert', methods=['POST'])
 def convert():
-    # Extract the uploaded file from the request
     file = request.files.get('files[]')
-    
+
     if not file:
         return jsonify({'error': 'No file uploaded'}), 400
-    
-    # Read the PDF file to extract text
+
     pdf_reader = PyPDF2.PdfReader(file)
     text = ''
     for page in pdf_reader.pages:
         text += page.extract_text()
 
-    # Get quiz options from the form data
     question_type = request.form.get('questionType')
     difficulty = request.form.get('difficulty')
     num_sets = int(request.form.get('numSets'))
-    
+
     sets = []
     for i in range(1, num_sets + 1):
         set_questions = int(request.form.get(f'set-{i}'))
+        questions = []
+
+        for q in range(1, set_questions + 1):
+            if question_type == 'Multiple Choice':
+                question = f"Sample Question {q} (Difficulty: {difficulty})"
+                choices = {
+                    "A": f"Choice A for Question {q}",
+                    "B": f"Choice B for Question {q}",
+                    "C": f"Choice C for Question {q}",
+                    "D": f"Choice D for Question {q}"
+                }
+                correct_answer = "A"
+                questions.append({
+                    "question": question,
+                    "choices": choices,
+                    "answer": correct_answer
+                })
+
+            elif question_type == 'True or False':
+                statement = f"Sample Statement {q} (Difficulty: {difficulty})"
+                answer = "True" if q % 2 == 0 else "False"
+                questions.append({
+                    "statement": statement,
+                    "answer": answer
+                })
+
+            elif question_type == 'Fill in the Blanks':
+                sentence = f"The Earth is _____. (Difficulty: {difficulty})"
+                correct_word = "round"
+                questions.append({
+                    "sentence": sentence,
+                    "answer": correct_word
+                })
+
+            else:
+                questions.append({
+                    "error": "Invalid question type"
+                })
+
         sets.append({
             'set': f'Set-{chr(64 + i)}',
-            'questions': set_questions
+            'questions': questions
         })
-    
-    # Prepare a response message that includes the extracted text and form data
+
     response = {
         'quiz': {
             'Sets': sets,
             'Difficulty': difficulty,
             'Question Type': question_type,
-            'Text from PDF': text[:500],  # Returning the first 500 characters of the extracted text as a preview
-            'Number of Questions': sum(set['questions'] for set in sets)
+            'Text from PDF': text[:500],
+            'Number of Questions': sum(len(set['questions']) for set in sets)
         }
     }
 
