@@ -33,7 +33,7 @@ def convert():
         questions = []
 
         for q in range(1, set_questions + 1):
-            if question_type == 'Multiple Choice':
+            if question_type == 'multiple-choice':
                 question = f"Sample Question {q} (Difficulty: {difficulty})"
                 choices = {
                     "A": f"Choice A for Question {q}",
@@ -48,7 +48,7 @@ def convert():
                     "answer": correct_answer
                 })
 
-            elif question_type == 'True or False':
+            elif question_type == 'true-false':
                 statement = f"Sample Statement {q} (Difficulty: {difficulty})"
                 answer = "True" if q % 2 == 0 else "False"
                 questions.append({
@@ -56,7 +56,7 @@ def convert():
                     "answer": answer
                 })
 
-            elif question_type == 'Fill in the Blanks':
+            elif question_type == 'fill-blank':
                 sentence = f"The Earth is _____. (Difficulty: {difficulty})"
                 correct_word = "round"
                 questions.append({
