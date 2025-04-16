@@ -3,8 +3,6 @@ from flask_cors import CORS
 import PyPDF2
 
 app = Flask(__name__)
-
-# Enable CORS for specific origins
 CORS(app, origins=[
     "http://127.0.0.1:5500",
     "https://sample-render-hosting-1.onrender.com",
@@ -14,14 +12,11 @@ CORS(app, origins=[
 @app.route('/convert', methods=['POST'])
 def convert():
     file = request.files.get('files[]')
-
     if not file:
         return jsonify({'error': 'No file uploaded'}), 400
 
     pdf_reader = PyPDF2.PdfReader(file)
-    text = ''
-    for page in pdf_reader.pages:
-        text += page.extract_text()
+    text = ''.join([page.extract_text() for page in pdf_reader.pages])
 
     question_type = request.form.get('questionType')
     difficulty = request.form.get('difficulty')
@@ -31,56 +26,42 @@ def convert():
     for i in range(1, num_sets + 1):
         set_questions = int(request.form.get(f'set-{i}'))
         questions = []
+        answers = []
 
         for q in range(1, set_questions + 1):
             if question_type == 'multiple-choice':
-                question = f"Sample Question {q} (Difficulty: {difficulty})"
+                question = f"{q}. Sample Question {q} (Difficulty: {difficulty})"
                 choices = {
-                    "A": f"Choice A for Question {q}",
-                    "B": f"Choice B for Question {q}",
-                    "C": f"Choice C for Question {q}",
-                    "D": f"Choice D for Question {q}"
+                    "A": f"A. Choice A for Question {q}",
+                    "B": f"B. Choice B for Question {q}",
+                    "C": f"C. Choice C for Question {q}",
+                    "D": f"D. Choice D for Question {q}"
                 }
-                correct_answer = "A"
-                questions.append({
-                    "question": question,
-                    "choices": choices,
-                    "answer": correct_answer
-                })
+                # For now randomly pick answer 'A', 'B', 'C', 'D' to simulate
+                import random
+                correct_answer = random.choice(['A', 'B', 'C', 'D'])
 
-            elif question_type == 'true-false':
-                statement = f"Sample Statement {q} (Difficulty: {difficulty})"
-                answer = "True" if q % 2 == 0 else "False"
-                questions.append({
-                    "statement": statement,
-                    "answer": answer
-                })
-
-            elif question_type == 'fill-blank':
-                sentence = f"The Earth is _____. (Difficulty: {difficulty})"
-                correct_word = "round"
-                questions.append({
-                    "sentence": sentence,
-                    "answer": correct_word
-                })
+                question_text = question + "\n" + "\n".join(choices.values())
+                questions.append(question_text)
+                answers.append(f"{q}. {correct_answer}")
 
             else:
-                questions.append({
-                    "error": "Invalid question type"
-                })
+                questions.append(f"{q}. Unsupported question type")
+                answers.append(f"{q}. N/A")
 
         sets.append({
-            'set': f'Set-{chr(64 + i)}',
-            'questions': questions
+            'set': f"Set-{chr(64 + i)}",
+            'questions': questions,
+            'key_to_correction': answers
         })
 
     response = {
         'quiz': {
-            'Sets': sets,
-            'Difficulty': difficulty,
             'Question Type': question_type,
-            'Text from PDF': text[:500],
-            'Number of Questions': sum(len(set['questions']) for set in sets)
+            'Difficulty': difficulty,
+            'Number of Questions': sum(len(s['questions']) for s in sets),
+            'Text from PDF (preview)': text[:500],
+            'Generated Sets': sets
         }
     }
 
