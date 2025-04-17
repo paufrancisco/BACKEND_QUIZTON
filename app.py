@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import PyPDF2
+import random
 
 app = Flask(__name__)
 CORS(app, origins=[
@@ -19,14 +20,13 @@ def convert():
     text = ''.join([page.extract_text() for page in pdf_reader.pages])
 
     question_type = request.form.get('questionType')
-    difficulty = request.form.get('difficulty')
     num_sets = int(request.form.get('numSets'))
 
     sets = []
     for i in range(1, num_sets + 1):
-        set_questions = int(request.form.get(f'set-{i}'))
-        questions = []
-        answers = []
+        set_questions = int(request.form.get(f'set-{i}-questions'))
+        difficulty = request.form.get(f'set-{i}-difficulty')
+        questions, answers = [], []
 
         for q in range(1, set_questions + 1):
             if question_type == 'multiple-choice':
@@ -37,8 +37,6 @@ def convert():
                     "C": f"C. Choice C for Question {q}",
                     "D": f"D. Choice D for Question {q}"
                 }
-                # For now randomly pick answer 'A', 'B', 'C', 'D' to simulate
-                import random
                 correct_answer = random.choice(['A', 'B', 'C', 'D'])
 
                 question_text = question + "\n" + "\n".join(choices.values())
@@ -51,6 +49,7 @@ def convert():
 
         sets.append({
             'set': f"Set-{chr(64 + i)}",
+            'difficulty': difficulty,
             'questions': questions,
             'key_to_correction': answers
         })
@@ -58,7 +57,6 @@ def convert():
     response = {
         'quiz': {
             'Question Type': question_type,
-            'Difficulty': difficulty,
             'Number of Questions': sum(len(s['questions']) for s in sets),
             'Text from PDF (preview)': text[:500],
             'Generated Sets': sets
