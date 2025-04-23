@@ -17,15 +17,16 @@ def convert():
         return jsonify({'error': 'No file uploaded'}), 400
 
     pdf_reader = PyPDF2.PdfReader(file)
-    text = ''.join([page.extract_text() for page in pdf_reader.pages])
+    text = ''.join([page.extract_text() or '' for page in pdf_reader.pages])
 
-    question_type = request.form.get('questionType')
     num_sets = int(request.form.get('numSets'))
-
     sets = []
+
     for i in range(1, num_sets + 1):
         set_questions = int(request.form.get(f'set-{i}-questions'))
         difficulty = request.form.get(f'set-{i}-difficulty')
+        question_type = request.form.get(f'set-{i}-question-type')
+
         questions, answers = [], []
 
         for q in range(1, set_questions + 1):
@@ -38,11 +39,19 @@ def convert():
                     "D": f"D. Choice D for Question {q}"
                 }
                 correct_answer = random.choice(['A', 'B', 'C', 'D'])
-
                 question_text = question + "\n" + "\n".join(choices.values())
                 questions.append(question_text)
                 answers.append(f"{q}. {correct_answer}")
-
+            elif question_type == 'true-false':
+                question = f"{q}. Sample True/False Question {q} (Difficulty: {difficulty})"
+                correct_answer = random.choice(['True', 'False'])
+                questions.append(question)
+                answers.append(f"{q}. {correct_answer}")
+            elif question_type == 'fill-blank':
+                question = f"{q}. Fill in the blank: _____ is part of Set {i} (Difficulty: {difficulty})"
+                correct_answer = f"Answer{q}"
+                questions.append(question)
+                answers.append(f"{q}. {correct_answer}")
             else:
                 questions.append(f"{q}. Unsupported question type")
                 answers.append(f"{q}. N/A")
@@ -50,13 +59,13 @@ def convert():
         sets.append({
             'set': f"Set-{chr(64 + i)}",
             'difficulty': difficulty,
+            'question_type': question_type,
             'questions': questions,
             'key_to_correction': answers
         })
 
     response = {
         'quiz': {
-            'Question Type': question_type,
             'Number of Questions': sum(len(s['questions']) for s in sets),
             'Text from PDF (preview)': text[:500],
             'Generated Sets': sets
