@@ -10,6 +10,10 @@ CORS(app, origins=[
     "https://paufrancisco.github.io"
 ])
 
+def romanize(num):
+    roman_numerals = ['I', 'II', 'III']
+    return roman_numerals[num - 1] if 1 <= num <= 3 else str(num)
+
 @app.route('/convert', methods=['POST'])
 def convert():
     file = request.files.get('files[]')
@@ -20,6 +24,8 @@ def convert():
     text = ''.join([page.extract_text() or '' for page in pdf_reader.pages])
 
     num_sets = int(request.form.get('numSets'))
+    num_sets = min(num_sets, 3)  # Limit to a max of 3 parts
+
     sets = []
 
     for i in range(1, num_sets + 1):
@@ -48,7 +54,7 @@ def convert():
                 questions.append(question)
                 answers.append(f"{q}. {correct_answer}")
             elif question_type == 'fill-blank':
-                question = f"{q}. Fill in the blank: _____ is part of Set {i} (Difficulty: {difficulty})"
+                question = f"{q}. Fill in the blank: _____ is part of Part {romanize(i)} (Difficulty: {difficulty})"
                 correct_answer = f"Answer{q}"
                 questions.append(question)
                 answers.append(f"{q}. {correct_answer}")
@@ -57,7 +63,7 @@ def convert():
                 answers.append(f"{q}. N/A")
 
         sets.append({
-            'set': f"Set-{chr(64 + i)}",
+            'set': f"Part {romanize(i)}",
             'difficulty': difficulty,
             'question_type': question_type,
             'questions': questions,
