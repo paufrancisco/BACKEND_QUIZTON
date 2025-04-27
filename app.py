@@ -33,33 +33,52 @@ def convert():
         difficulty = request.form.get(f'set-{i}-difficulty')
         question_type = request.form.get(f'set-{i}-question-type')
 
-        questions, answers = [], []
+        questions = []
+        answers = []
 
         for q in range(1, set_questions + 1):
             if question_type == 'multiple-choice':
-                question = f"{q}. Sample Question {q} (Difficulty: {difficulty})"
+                question_text = f"Sample Question {q} (Difficulty: {difficulty})"
                 choices = {
-                    "A": f"A. Choice A for Question {q}",
-                    "B": f"B. Choice B for Question {q}",
-                    "C": f"C. Choice C for Question {q}",
-                    "D": f"D. Choice D for Question {q}"
+                    "A": f"Choice A for Question {q}",
+                    "B": f"Choice B for Question {q}",
+                    "C": f"Choice C for Question {q}",
+                    "D": f"Choice D for Question {q}"
                 }
                 correct_answer = random.choice(['A', 'B', 'C', 'D'])
-                question_text = question + "\n" + "\n".join(choices.values())
-                questions.append(question_text)
+                questions.append({
+                    "number": q,
+                    "question": question_text,
+                    "choices": choices
+                })
                 answers.append(f"{q}. {correct_answer}")
             elif question_type == 'true-false':
-                question = f"{q}. Sample True/False Question {q} (Difficulty: {difficulty})"
+                question_text = f"Sample True/False Question {q} (Difficulty: {difficulty})"
                 correct_answer = random.choice(['True', 'False'])
-                questions.append(question)
+                questions.append({
+                    "number": q,
+                    "question": question_text,
+                    "choices": {
+                        "True": "True",
+                        "False": "False"
+                    }
+                })
                 answers.append(f"{q}. {correct_answer}")
             elif question_type == 'fill-blank':
-                question = f"{q}. Fill in the blank: _____ is part of Part {romanize(i)} (Difficulty: {difficulty})"
+                question_text = f"Fill in the blank: _____ is part of Part {romanize(i)} (Difficulty: {difficulty})"
                 correct_answer = f"Answer{q}"
-                questions.append(question)
+                questions.append({
+                    "number": q,
+                    "question": question_text,
+                    "choices": {}  # no choices for fill-in-the-blank
+                })
                 answers.append(f"{q}. {correct_answer}")
             else:
-                questions.append(f"{q}. Unsupported question type")
+                questions.append({
+                    "number": q,
+                    "question": f"Unsupported question type",
+                    "choices": {}
+                })
                 answers.append(f"{q}. N/A")
 
         sets.append({
