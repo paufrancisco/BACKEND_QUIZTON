@@ -7,7 +7,8 @@ app = Flask(__name__)
 CORS(app, origins=[
     "http://127.0.0.1:5500",
     "https://sample-render-hosting-1.onrender.com",
-    "https://paufrancisco.github.io"
+    "https://paufrancisco.github.io",
+    "https://quizton-lake.vercel.app"
 ])
 
 def romanize(num):
