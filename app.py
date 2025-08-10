@@ -4,7 +4,14 @@ import PyPDF2
 import random
 import re
 import spacy
-from transformers import T5ForConditionalGeneration, T5Tokenizer
+from transformers import (
+    T5ForConditionalGeneration, 
+    T5Tokenizer,
+    AutoTokenizer, 
+    AutoModelForQuestionAnswering,
+    pipeline
+)
+import torch
 
 app = Flask(__name__)
 CORS(app, origins=[
@@ -13,9 +20,22 @@ CORS(app, origins=[
     "https://paufrancisco.github.io"
 ])
 
+# Load models
 nlp = spacy.load("en_core_web_sm")
-tokenizer = T5Tokenizer.from_pretrained("valhalla/t5-small-qa-qg-hl")
-model = T5ForConditionalGeneration.from_pretrained("valhalla/t5-small-qa-qg-hl")
+
+# T5 for question generation
+t5_tokenizer = T5Tokenizer.from_pretrained("valhalla/t5-small-qa-qg-hl")
+t5_model = T5ForConditionalGeneration.from_pretrained("valhalla/t5-small-qa-qg-hl")
+
+# RoBERTa for question answering
+try:
+    qa_pipeline = pipeline("question-answering", 
+                          model="deepset/roberta-base-squad2",
+                          tokenizer="deepset/roberta-base-squad2")
+    print("RoBERTa model loaded successfully")
+except Exception as e:
+    print(f"Warning: RoBERTa model failed to load: {e}")
+    qa_pipeline = None
 
 
 def romanize(num):
@@ -23,355 +43,398 @@ def romanize(num):
     return roman_numerals[num - 1] if 1 <= num <= 3 else str(num)
 
 
-def clean_and_split_text(text):
-    text = re.sub(r'\s+', ' ', text)  # normalize whitespace
-    doc = nlp(text)
-    sentences = [sent.text.strip() for sent in doc.sents if len(sent.text.split()) > 4]
-    if not sentences:  # fallback if spaCy sentence detection fails
-        sentences = [s.strip() for s in re.split(r'(?<=[.!?]) +', text) if len(s.split()) > 4]
-    return sentences
+def advanced_text_cleaning(text):
+    """Advanced text cleaning to handle PDF artifacts"""
+    
+    # Remove common PDF artifacts
+    text = re.sub(r'\n+', ' ', text)  # Replace newlines with spaces
+    text = re.sub(r'\s+', ' ', text)  # Normalize whitespace
+    text = re.sub(r'[^\w\s.,!?;:()\-\'"]', ' ', text)  # Keep only essential punctuation
+    
+    # Remove bullet points and numbering
+    text = re.sub(r'^\s*[•·▪▫◦‣⁃]\s*', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^\s*[a-zA-Z]\.\s*', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^\s*\d+\.\s*', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^\s*[ivxlcdm]+\.\s*', '', text, flags=re.MULTILINE | re.IGNORECASE)
+    
+    # Remove common list patterns
+    text = re.sub(r'\ba\.\s+[A-Z][^.]*\s+b\.\s+[A-Z][^.]*\s+c\..*?(?=\s[A-Z]|\.|$)', ' ', text)
+    text = re.sub(r'[a-z]\.\s+[A-Z][^.]*(?=\s+[a-z]\.|$)', ' ', text)
+    
+    # Remove incomplete fragments (less than 3 words)
+    sentences = re.split(r'[.!?]+', text)
+    valid_sentences = []
+    
+    for sentence in sentences:
+        sentence = sentence.strip()
+        words = sentence.split()
+        
+        # Skip fragments and lists
+        if (len(words) >= 5 and  # At least 5 words
+            not re.match(r'^[a-z]\.\s*', sentence) and  # Not a list item
+            not sentence.startswith('•') and  # Not a bullet point
+            len([w for w in words if len(w) > 2]) >= 3):  # At least 3 substantial words
+            valid_sentences.append(sentence)
+    
+    return valid_sentences
 
 
-def extract_entities(sentences):
-    """Extract entities per sentence and build pools."""
+def extract_quality_entities(sentences):
+    """Extract only high-quality, complete entities"""
     entity_pool = {}
     sent_entities = []
-
+    
+    # Define quality thresholds
+    MIN_ENTITY_LENGTH = 2
+    MAX_ENTITY_LENGTH = 50
+    
     for sent in sentences:
         doc = nlp(sent)
         ents_in_sent = []
+        
         for ent in doc.ents:
-            if ent.label_ in ['PERSON', 'ORG', 'GPE', 'DATE', 'NORP', 'MONEY', 'PERCENT', 'TIME', 'CARDINAL']:
-                entity_pool.setdefault(ent.label_, set()).add(ent.text)
-                ents_in_sent.append((ent.text, ent.label_))
+            entity_text = ent.text.strip()
+            
+            # Quality filters
+            if (ent.label_ in ['PERSON', 'ORG', 'GPE', 'DATE', 'MONEY', 'PERCENT', 'TIME', 'CARDINAL'] and
+                MIN_ENTITY_LENGTH <= len(entity_text) <= MAX_ENTITY_LENGTH and
+                not re.match(r'^[a-z]\.\s', entity_text) and  # Not a list item
+                not entity_text.startswith('•') and  # Not a bullet
+                len(entity_text.split()) <= 4 and  # Not too long
+                not re.match(r'^\d+\.$', entity_text)):  # Not just a number with period
+                
+                entity_pool.setdefault(ent.label_, set()).add(entity_text)
+                ents_in_sent.append((entity_text, ent.label_))
+        
         sent_entities.append(ents_in_sent)
+    
     return entity_pool, sent_entities
 
 
-def generate_question(sentence, answer):
-    highlighted = sentence.replace(answer, f"<hl> {answer} <hl>", 1)
-    input_text = f"generate question: {highlighted}"
-    inputs = tokenizer.encode(input_text, return_tensors="pt")
-    outputs = model.generate(inputs, max_length=64, num_beams=4, early_stopping=True)
-    return tokenizer.decode(outputs[0], skip_special_tokens=True)
-
-
-def get_context_entities(sent_entities, index, window=2):
-    """Return entities from same and adjacent sentences for context-aware hard mode."""
-    context_entities = set()
-    start = max(0, index - window)
-    end = min(len(sent_entities), index + window + 1)
+def generate_question_with_validation(sentence, answer, context=""):
+    """Generate question with better prompting and validation"""
     
-    for i in range(start, end):
-        for ent_text, ent_label in sent_entities[i]:
-            context_entities.add((ent_text, ent_label))
-    return context_entities
-
-
-def filter_distractors(correct_text, correct_label, entity_pool, difficulty, context_entities=None):
-    """
-    Returns a list of distractors based on difficulty:
-    - Easy: distractors from completely different entity types (very obviously wrong)
-    - Medium: distractors from related but different entity types 
-    - Hard: distractors from same entity type, preferably from nearby context (very confusing)
-    """
-    distractors = []
-    
-    # Define entity type relationships for better difficulty scaling
-    type_groups = {
-        'PEOPLE': ['PERSON'],
-        'ORGANIZATIONS': ['ORG'], 
-        'PLACES': ['GPE'],
-        'NUMBERS': ['DATE', 'MONEY', 'PERCENT', 'TIME', 'CARDINAL'],
-        'GROUPS': ['NORP']
-    }
-    
-    correct_group = None
-    for group, types in type_groups.items():
-        if correct_label in types:
-            correct_group = group
-            break
-
-    if difficulty == 'easy':
-        # Use entities from COMPLETELY different groups - most obviously wrong
-        wrong_groups = [g for g in type_groups.keys() if g != correct_group]
-        all_wrong_entities = []
-        
-        for wrong_group in wrong_groups:
-            for entity_type in type_groups[wrong_group]:
-                if entity_type in entity_pool:
-                    all_wrong_entities.extend(list(entity_pool[entity_type]))
-        
-        # Remove correct answer and prioritize very different types
-        distractors = [e for e in all_wrong_entities if e != correct_text]
-        
-        # Shuffle and prioritize most different types first
-        random.shuffle(distractors)
-        
-    elif difficulty == 'medium':
-        # Mix same group and different groups - moderately confusing
-        same_group_entities = []
-        different_group_entities = []
-        
-        # Get entities from same group
-        if correct_group:
-            for entity_type in type_groups[correct_group]:
-                if entity_type in entity_pool:
-                    same_group_entities.extend(list(entity_pool[entity_type]))
-        
-        # Get entities from different groups  
-        for group, types in type_groups.items():
-            if group != correct_group:
-                for entity_type in types:
-                    if entity_type in entity_pool:
-                        different_group_entities.extend(list(entity_pool[entity_type]))
-        
-        # Remove correct answer
-        same_group_entities = [e for e in same_group_entities if e != correct_text]
-        different_group_entities = [e for e in different_group_entities if e != correct_text]
-        
-        # Mix: 60% same group, 40% different group for medium difficulty
-        distractors = same_group_entities + different_group_entities[:len(same_group_entities)]
-        random.shuffle(distractors)
-        
-    else:  # hard
-        # Same entity type, preferably from nearby context - most challenging
-        if context_entities:
-            # Prioritize exact same type from context
-            context_same_type = [e for e, l in context_entities 
-                               if l == correct_label and e != correct_text]
-            
-            # Also get same group but different type from context
-            context_same_group = []
-            if correct_group:
-                for entity_type in type_groups[correct_group]:
-                    context_same_group.extend([e for e, l in context_entities 
-                                             if l == entity_type and e != correct_text])
-            
-            if len(context_same_type) >= 2:
-                # Best case: multiple same-type from context
-                distractors = context_same_type
-            elif context_same_group:
-                # Good case: same group from context + some same type from document
-                global_same_type = list(entity_pool.get(correct_label, set()) - {correct_text})
-                distractors = context_same_group + global_same_type[:2]
-            else:
-                # Fallback: same type from document
-                distractors = list(entity_pool.get(correct_label, set()) - {correct_text})
-        else:
-            distractors = list(entity_pool.get(correct_label, set()) - {correct_text})
-        
-        random.shuffle(distractors)
-
-    # Remove duplicates while preserving order
-    seen = set()
-    unique_distractors = []
-    for d in distractors:
-        if d not in seen and d != correct_text and len(d.strip()) > 0:
-            seen.add(d)
-            unique_distractors.append(d)
-    
-    return unique_distractors
-
-
-def select_entity_for_question(doc_entities, difficulty, context_entities=None):
-    """Select which entity to use based on difficulty."""
-    if not doc_entities:
+    # Clean the answer
+    answer = answer.strip()
+    if not answer or len(answer) < 2:
         return None
     
-    # Categorize entities by type and prominence
-    prominent_types = ['PERSON', 'ORG']  # Usually more obvious (names, companies)
-    location_types = ['GPE']  # Places - medium difficulty 
-    subtle_types = ['DATE', 'MONEY', 'PERCENT', 'TIME', 'CARDINAL', 'NORP']  # Less obvious details
+    # Multiple question generation strategies
+    strategies = [
+        f"generate question: {sentence.replace(answer, f'<hl> {answer} <hl>', 1)}",
+        f"question: {answer} context: {sentence}",
+        f"ask about: {answer} from: {sentence}"
+    ]
     
-    prominent_entities = [e for e in doc_entities if e.label_ in prominent_types]
-    location_entities = [e for e in doc_entities if e.label_ in location_types]
-    subtle_entities = [e for e in doc_entities if e.label_ in subtle_types]
+    best_question = None
+    best_score = 0
     
-    if difficulty == 'easy':
-        # Prefer well-known entities (people, organizations) - longest ones
-        if prominent_entities:
-            # Sort by length and familiarity
-            return max(prominent_entities, key=lambda e: len(e.text))
-        elif location_entities:
-            return max(location_entities, key=lambda e: len(e.text))
-        else:
-            return max(doc_entities, key=lambda e: len(e.text))
+    for strategy in strategies:
+        try:
+            inputs = t5_tokenizer.encode(strategy, return_tensors="pt", max_length=512, truncation=True)
+            outputs = t5_model.generate(
+                inputs, 
+                max_length=64, 
+                num_beams=4, 
+                temperature=0.8,
+                do_sample=True,
+                early_stopping=True,
+                repetition_penalty=1.2
+            )
+            question = t5_tokenizer.decode(outputs[0], skip_special_tokens=True)
+            question = question.strip()
+            
+            # Score the question
+            score = score_question_quality(question, answer, sentence)
+            
+            if score > best_score:
+                best_score = score
+                best_question = question
+                
+        except Exception as e:
+            continue
     
-    elif difficulty == 'medium':
-        # Mix of prominent and location entities, avoid the most obvious
-        candidates = prominent_entities + location_entities
-        if candidates:
-            return random.choice(candidates)
-        else:
-            return random.choice(doc_entities)
-    
-    else:  # hard
-        # Prefer subtle details, numbers, dates - things that require careful reading
-        if subtle_entities:
-            # Choose shortest subtle entity (harder to notice)
-            return min(subtle_entities, key=lambda e: len(e.text))
-        elif location_entities:
-            # If no subtle entities, use shortest location
-            return min(location_entities, key=lambda e: len(e.text))
-        else:
-            return min(doc_entities, key=lambda e: len(e.text))
+    return best_question if best_score > 0.5 else None
 
 
-def generate_mcq(sentence, difficulty, entity_pool, sent_entities, index):
+def score_question_quality(question, answer, context):
+    """Score question quality based on various criteria"""
+    if not question or len(question) < 10:
+        return 0
+    
+    score = 1.0
+    
+    # Penalize questions that contain the answer
+    if answer.lower() in question.lower():
+        score *= 0.3
+    
+    # Penalize fragments or incomplete questions
+    if not question.endswith('?'):
+        score *= 0.7
+    
+    # Penalize very short questions
+    if len(question.split()) < 4:
+        score *= 0.5
+    
+    # Bonus for question words
+    question_words = ['what', 'who', 'where', 'when', 'why', 'how', 'which']
+    if any(qw in question.lower() for qw in question_words):
+        score *= 1.2
+    
+    # Validate with RoBERTa if available
+    if qa_pipeline:
+        try:
+            result = qa_pipeline(question=question, context=context)
+            roberta_answer = result['answer'].lower().strip()
+            expected_answer = answer.lower().strip()
+            
+            # Check answer similarity
+            if expected_answer in roberta_answer or roberta_answer in expected_answer:
+                score *= (1.0 + result['score'])
+            else:
+                score *= 0.5
+        except:
+            pass
+    
+    return min(score, 2.0)  # Cap at 2.0
+
+
+def generate_smart_distractors(correct_answer, entity_pool, sentence, difficulty='medium'):
+    """Generate contextually appropriate distractors"""
+    
+    # Find entity type of correct answer
+    doc = nlp(correct_answer)
+    correct_ents = [ent for ent in doc.ents]
+    correct_label = correct_ents[0].label_ if correct_ents else 'MISC'
+    
+    distractors = []
+    
+    # Strategy 1: Same type entities
+    if correct_label in entity_pool:
+        same_type = [e for e in entity_pool[correct_label] if e != correct_answer]
+        distractors.extend(same_type[:2])
+    
+    # Strategy 2: Related types based on difficulty
+    type_similarity = {
+        'PERSON': ['ORG', 'GPE'],
+        'ORG': ['PERSON', 'GPE'],
+        'GPE': ['PERSON', 'ORG'],
+        'DATE': ['TIME', 'CARDINAL'],
+        'TIME': ['DATE', 'CARDINAL'],
+        'CARDINAL': ['DATE', 'TIME', 'MONEY', 'PERCENT'],
+        'MONEY': ['CARDINAL', 'PERCENT'],
+        'PERCENT': ['CARDINAL', 'MONEY']
+    }
+    
+    if difficulty == 'hard':
+        # For hard questions, use very similar entities
+        related_types = type_similarity.get(correct_label, [])[:1]
+    elif difficulty == 'easy':
+        # For easy questions, use obviously different entities
+        all_types = list(entity_pool.keys())
+        related_types = [t for t in all_types if t != correct_label][-2:]
+    else:
+        # Medium difficulty
+        related_types = type_similarity.get(correct_label, [])[:2]
+    
+    for rel_type in related_types:
+        if rel_type in entity_pool:
+            related_entities = list(entity_pool[rel_type])[:2]
+            distractors.extend(related_entities)
+    
+    # Strategy 3: Contextual distractors from same sentence
+    sent_doc = nlp(sentence)
+    for ent in sent_doc.ents:
+        if (ent.text != correct_answer and 
+            len(ent.text.strip()) > 1 and
+            ent.text not in distractors):
+            distractors.append(ent.text)
+    
+    # Clean and deduplicate distractors
+    clean_distractors = []
+    seen = set()
+    
+    for d in distractors:
+        d_clean = d.strip()
+        if (d_clean.lower() not in seen and 
+            d_clean.lower() != correct_answer.lower() and
+            len(d_clean) > 1 and
+            not re.match(r'^[a-z]\.\s*', d_clean) and
+            not d_clean.startswith('•')):
+            seen.add(d_clean.lower())
+            clean_distractors.append(d_clean)
+    
+    return clean_distractors
+
+
+def generate_high_quality_mcq(sentence, difficulty, entity_pool, sent_entities, index):
+    """Generate high-quality MCQ with proper validation"""
+    
+    # Skip if sentence is too short or looks like a fragment
+    if (len(sentence.split()) < 5 or
+        sentence.startswith('a.') or
+        sentence.startswith('•') or
+        re.match(r'^\d+\.', sentence.strip())):
+        return None
+    
     doc = nlp(sentence)
-    entities = [ent for ent in doc.ents if ent.label_ in entity_pool and ent.text.strip()]
+    entities = [ent for ent in doc.ents 
+                if (ent.label_ in entity_pool and 
+                    len(ent.text.strip()) > 1 and
+                    len(ent.text.split()) <= 3 and
+                    not ent.text.strip().startswith('a.') and
+                    not ent.text.strip().startswith('•'))]
     
     if not entities:
         return None
     
-    context_entities = get_context_entities(sent_entities, index)
+    # Select best entity based on difficulty and quality
+    scored_entities = []
+    for ent in entities:
+        quality_score = 1.0
+        
+        # Prefer certain types based on difficulty
+        if difficulty == 'easy':
+            if ent.label_ in ['PERSON', 'ORG']:
+                quality_score += 0.5
+        elif difficulty == 'hard':
+            if ent.label_ in ['DATE', 'CARDINAL', 'PERCENT']:
+                quality_score += 0.5
+        
+        # Prefer longer entities for easier recognition
+        if difficulty == 'easy' and len(ent.text) > 5:
+            quality_score += 0.3
+        elif difficulty == 'hard' and len(ent.text) <= 5:
+            quality_score += 0.3
+        
+        scored_entities.append((ent, quality_score))
     
-    # Filter entities by difficulty preference FIRST
-    if difficulty == 'easy':
-        # Strongly prefer people and organizations
-        preferred = [e for e in entities if e.label_ in ['PERSON', 'ORG']]
-        entities = preferred if preferred else entities
-    elif difficulty == 'hard':
-        # Strongly prefer dates, numbers, and subtle details
-        preferred = [e for e in entities if e.label_ in ['DATE', 'MONEY', 'PERCENT', 'TIME', 'CARDINAL']]
-        entities = preferred if preferred else entities
-    
-    # Select entity based on difficulty from filtered list
-    selected_entity = select_entity_for_question(entities, difficulty, context_entities)
-    if not selected_entity:
+    # Select best entity
+    if not scored_entities:
         return None
     
-    question = generate_question(sentence, selected_entity.text)
-    distractors = filter_distractors(selected_entity.text, selected_entity.label_, 
-                                   entity_pool, difficulty, context_entities)
+    best_entity = max(scored_entities, key=lambda x: x[1])[0]
+    correct_answer = best_entity.text.strip()
     
-    # Build choices (correct + 3 distractors)
-    choices = [selected_entity.text]
-    if len(distractors) >= 3:
-        choices.extend(distractors[:3])
-    else:
-        # Need more distractors - get from all entities
-        all_entities = set()
-        for entities_set in entity_pool.values():
-            all_entities.update(entities_set)
+    # Generate question
+    question = generate_question_with_validation(sentence, correct_answer)
+    if not question:
+        return None
+    
+    # Generate distractors
+    distractors = generate_smart_distractors(correct_answer, entity_pool, sentence, difficulty)
+    
+    # Ensure we have enough good distractors
+    if len(distractors) < 3:
+        # Add generic but plausible distractors
+        all_entities = []
+        for entity_set in entity_pool.values():
+            all_entities.extend([e for e in entity_set if e != correct_answer])
         
-        additional_needed = 3 - len(distractors)
-        additional_distractors = list(all_entities - set(choices) - set(distractors))
-        random.shuffle(additional_distractors)
-        
-        choices.extend(distractors)
-        choices.extend(additional_distractors[:additional_needed])
+        additional_distractors = random.sample(
+            all_entities, 
+            min(3 - len(distractors), len(all_entities))
+        )
+        distractors.extend(additional_distractors)
     
-    # Ensure exactly 4 choices
-    while len(choices) < 4:
-        # Last resort - add generic placeholders
-        choices.append(f"Option {len(choices)}")
+    # Final quality check
+    if len(distractors) < 3:
+        return None
     
-    choices = choices[:4]  # Trim to exactly 4
+    # Build choices
+    choices = [correct_answer] + distractors[:3]
     random.shuffle(choices)
     
-    choice_map = dict(zip(["A", "B", "C", "D"], choices))
-    correct_letter = next(k for k, v in choice_map.items() if v == selected_entity.text)
+    choice_map = dict(zip(['A', 'B', 'C', 'D'], choices))
+    correct_letter = next(k for k, v in choice_map.items() if v == correct_answer)
     
     return {
         "question": question,
         "choices": choice_map,
-        "correct": correct_letter
+        "correct": correct_letter,
+        "confidence": 0.8  # High confidence for properly generated questions
     }
 
 
-def generate_true_false(sentence, difficulty, entity_pool, sent_entities, index):
+def generate_true_false_improved(sentence, difficulty, entity_pool, sent_entities, index):
+    """Improved true/false generation"""
+    
+    # Skip fragments
+    if (len(sentence.split()) < 5 or
+        sentence.startswith('a.') or
+        sentence.startswith('•')):
+        return None
+    
     doc = nlp(sentence)
-    entities = [ent for ent in doc.ents if ent.label_ in entity_pool and ent.text.strip()]
-    
-    # Filter entities by difficulty preference FIRST
-    if difficulty == 'easy':
-        # Strongly prefer people and organizations for easy questions
-        preferred = [e for e in entities if e.label_ in ['PERSON', 'ORG']]
-        entities = preferred if preferred else entities
-    elif difficulty == 'hard':
-        # Strongly prefer dates, numbers, and subtle details for hard questions
-        preferred = [e for e in entities if e.label_ in ['DATE', 'MONEY', 'PERCENT', 'TIME', 'CARDINAL']]
-        entities = preferred if preferred else entities
-    
-    # Difficulty affects probability of making it false and type of replacement
-    if difficulty == 'easy':
-        make_false_prob = 0.6  # More likely to be false (easier to spot)
-    elif difficulty == 'medium':
-        make_false_prob = 0.5  # 50/50
-    else:  # hard
-        make_false_prob = 0.7  # More likely to be false but with subtle changes
-    
-    is_true = random.random() > make_false_prob
-    modified_sentence = sentence
-    correct_answer = "True"
-    
-    if not is_true and entities:
-        context_entities = get_context_entities(sent_entities, index)
-        
-        # Select entity to replace based on difficulty
-        entity_to_replace = select_entity_for_question(entities, difficulty, context_entities)
-        if not entity_to_replace:
-            entity_to_replace = random.choice(entities)
-        
-        # Get replacement based on difficulty
-        distractors = filter_distractors(entity_to_replace.text, entity_to_replace.label_, 
-                                       entity_pool, difficulty, context_entities)
-        
-        if distractors:
-            if difficulty == 'hard':
-                # Use most similar replacement for hard difficulty
-                replacement = distractors[0]  # Already filtered for context similarity
-            else:
-                # Use random replacement for easy/medium
-                replacement = random.choice(distractors[:5])  # From top candidates
-            
-            modified_sentence = sentence.replace(entity_to_replace.text, replacement, 1)
-            correct_answer = "False"
-    
-    return {
-        "question": modified_sentence,
-        "choices": {"True": "True", "False": "False"},
-        "correct": correct_answer
-    }
-
-
-def generate_fill_blank(sentence, difficulty, entity_pool, sent_entities, index):
-    doc = nlp(sentence)
-    entities = [ent for ent in doc.ents if ent.label_ in entity_pool and ent.text.strip()]
+    entities = [ent for ent in doc.ents 
+                if (ent.label_ in entity_pool and 
+                    len(ent.text.strip()) > 1)]
     
     if not entities:
         return None
     
-    # Filter entities by difficulty preference FIRST
-    if difficulty == 'easy':
-        # Strongly prefer people and organizations
-        preferred = [e for e in entities if e.label_ in ['PERSON', 'ORG']]
-        entities = preferred if preferred else entities
-    elif difficulty == 'hard':
-        # Strongly prefer dates, numbers, and subtle details
-        preferred = [e for e in entities if e.label_ in ['DATE', 'MONEY', 'PERCENT', 'TIME', 'CARDINAL']]
-        entities = preferred if preferred else entities
+    # 60% chance of making it false
+    make_false = random.random() < 0.6
     
-    context_entities = get_context_entities(sent_entities, index)
+    if make_false:
+        # Select entity to replace
+        entity_to_replace = random.choice(entities)
+        distractors = generate_smart_distractors(
+            entity_to_replace.text, entity_pool, sentence, difficulty
+        )
+        
+        if distractors:
+            replacement = random.choice(distractors[:3])
+            modified_sentence = sentence.replace(entity_to_replace.text, replacement, 1)
+            return {
+                "question": modified_sentence,
+                "choices": {"True": "True", "False": "False"},
+                "correct": "False"
+            }
     
-    # Select entity to blank based on difficulty
-    entity_to_blank = select_entity_for_question(entities, difficulty, context_entities)
-    if not entity_to_blank:
+    return {
+        "question": sentence,
+        "choices": {"True": "True", "False": "False"},
+        "correct": "True"
+    }
+
+
+def generate_fill_blank_improved(sentence, difficulty, entity_pool, sent_entities, index):
+    """Improved fill-in-the-blank generation"""
+    
+    # Skip fragments
+    if (len(sentence.split()) < 5 or
+        sentence.startswith('a.') or
+        sentence.startswith('•')):
         return None
     
-    # Create different blank styles based on difficulty
-    if difficulty == 'easy':
-        # Longer blank with hint
-        blank = f"_____({entity_to_blank.label_.lower()})"
-    elif difficulty == 'medium':
-        # Standard blank
-        blank = "_____"
-    else:  # hard
-        # Shorter blank, less obvious
-        blank = "___"
+    doc = nlp(sentence)
+    entities = [ent for ent in doc.ents 
+                if (ent.label_ in entity_pool and 
+                    len(ent.text.strip()) > 1 and
+                    len(ent.text.split()) <= 3)]
     
+    if not entities:
+        return None
+    
+    # Select entity based on difficulty
+    if difficulty == 'easy':
+        # Prefer longer, obvious entities
+        entity_to_blank = max(entities, key=lambda e: len(e.text))
+    elif difficulty == 'hard':
+        # Prefer shorter, subtle entities
+        entity_to_blank = min(entities, key=lambda e: len(e.text))
+    else:
+        entity_to_blank = random.choice(entities)
+    
+    # Create appropriate blank
+    blank_styles = {
+        'easy': f"_____ ({entity_to_blank.label_.lower()})",
+        'medium': "_____",
+        'hard': "___"
+    }
+    
+    blank = blank_styles.get(difficulty, "_____")
     question = sentence.replace(entity_to_blank.text, blank, 1)
     
     return {
@@ -387,65 +450,128 @@ def convert():
     if not file:
         return jsonify({'error': 'No file uploaded'}), 400
 
-    pdf_reader = PyPDF2.PdfReader(file)
-    text = ''.join([page.extract_text() or '' for page in pdf_reader.pages])
-
-    sentences = clean_and_split_text(text)
-    entity_pool, sent_entities = extract_entities(sentences)
-
-    num_sets = min(int(request.form.get('numSets', 1)), 3)
-
-    sets = []
-    current_sentence = 0
-
-    for i in range(1, num_sets + 1):
-        set_questions = int(request.form.get(f'set-{i}-questions', 5))
-        difficulty = request.form.get(f'set-{i}-difficulty', 'easy').lower()
-        question_type = request.form.get(f'set-{i}-question-type', 'multiple-choice').lower()
-
-        questions = []
-        answers = []
-        count = 0
-        attempts = 0
-        max_attempts = len(sentences) * 2  # Prevent infinite loops
-
-        while count < set_questions and current_sentence < len(sentences) and attempts < max_attempts:
-            sentence = sentences[current_sentence]
-            current_sentence += 1
-            attempts += 1
-
-            generated = None
-            if question_type == 'multiple-choice':
-                generated = generate_mcq(sentence, difficulty, entity_pool, sent_entities, current_sentence - 1)
-            elif question_type == 'true-false':
-                generated = generate_true_false(sentence, difficulty, entity_pool, sent_entities, current_sentence - 1)
-            elif question_type == 'fill-blank':
-                generated = generate_fill_blank(sentence, difficulty, entity_pool, sent_entities, current_sentence - 1)
-
-            if generated:
-                count += 1
-                questions.append({
-                    "number": count,
-                    "question": generated["question"],
-                    "choices": generated["choices"]
-                })
-                answers.append(f"{count}. {generated['correct']}")
-
-        sets.append({
-            'set': f"Part {romanize(i)}",
-            'difficulty': difficulty.title(),
-            'question_type': question_type.replace('-', ' ').title(),
-            'questions': questions,
-            'key_to_correction': answers
+    try:
+        pdf_reader = PyPDF2.PdfReader(file)
+        text = ''.join([page.extract_text() or '' for page in pdf_reader.pages])
+        
+        # Use advanced text cleaning
+        sentences = advanced_text_cleaning(text)
+        entity_pool, sent_entities = extract_quality_entities(sentences)
+        
+        # Filter out sentences that are too short or look like fragments
+        quality_sentences = [s for s in sentences 
+                           if (len(s.split()) >= 5 and 
+                               not s.strip().startswith('a.') and
+                               not s.strip().startswith('•') and
+                               not re.match(r'^\d+\.', s.strip()))]
+        
+        if not quality_sentences:
+            return jsonify({'error': 'No quality sentences found in PDF'}), 400
+        
+        num_sets = min(int(request.form.get('numSets', 1)), 3)
+        sets = []
+        current_sentence = 0
+        
+        for i in range(1, num_sets + 1):
+            set_questions = int(request.form.get(f'set-{i}-questions', 5))
+            difficulty = request.form.get(f'set-{i}-difficulty', 'easy').lower()
+            question_type = request.form.get(f'set-{i}-question-type', 'multiple-choice').lower()
+            
+            questions = []
+            answers = []
+            count = 0
+            attempts = 0
+            max_attempts = min(len(quality_sentences) * 3, 100)  # Prevent infinite loops
+            
+            while count < set_questions and attempts < max_attempts:
+                if current_sentence >= len(quality_sentences):
+                    current_sentence = 0  # Reset to beginning if needed
+                
+                sentence = quality_sentences[current_sentence]
+                current_sentence += 1
+                attempts += 1
+                
+                generated = None
+                try:
+                    if question_type == 'multiple-choice':
+                        generated = generate_high_quality_mcq(
+                            sentence, difficulty, entity_pool, sent_entities, current_sentence - 1
+                        )
+                    elif question_type == 'true-false':
+                        generated = generate_true_false_improved(
+                            sentence, difficulty, entity_pool, sent_entities, current_sentence - 1
+                        )
+                    elif question_type == 'fill-blank':
+                        generated = generate_fill_blank_improved(
+                            sentence, difficulty, entity_pool, sent_entities, current_sentence - 1
+                        )
+                except Exception as e:
+                    print(f"Error generating question: {e}")
+                    continue
+                
+                if generated and generated.get('question'):
+                    count += 1
+                    questions.append({
+                        "number": count,
+                        "question": generated["question"],
+                        "choices": generated["choices"],
+                        "confidence": generated.get("confidence", 0.5)
+                    })
+                    answers.append(f"{count}. {generated['correct']}")
+            
+            sets.append({
+                'set': f"Part {romanize(i)}",
+                'difficulty': difficulty.title(),
+                'question_type': question_type.replace('-', ' ').title(),
+                'questions': questions,
+                'key_to_correction': answers
+            })
+        
+        return jsonify({
+            'quiz': {
+                'Number of Questions': sum(len(s['questions']) for s in sets),
+                'Text from PDF (preview)': text[:500],
+                'Generated Sets': sets
+            }
         })
+        
+    except Exception as e:
+        print(f"Error in convert route: {e}")
+        return jsonify({'error': f'Failed to process PDF: {str(e)}'}), 500
 
-    return jsonify({
-        'quiz': {
-            'Number of Questions': sum(len(s['questions']) for s in sets),
-            'Text from PDF (preview)': text[:500],
-            'Generated Sets': sets
-        }
-    })
+
+@app.route('/validate-question', methods=['POST'])
+def validate_question():
+    """Validate a question using RoBERTa"""
+    data = request.json
+    question = data.get('question')
+    context = data.get('context')
+    expected_answer = data.get('expected_answer')
+    
+    if not all([question, context, expected_answer]):
+        return jsonify({'error': 'Missing required fields'}), 400
+    
+    if not qa_pipeline:
+        return jsonify({'error': 'RoBERTa model not available'}), 500
+    
+    try:
+        result = qa_pipeline(question=question, context=context)
+        
+        # Check similarity
+        predicted = result['answer'].lower().strip()
+        expected = expected_answer.lower().strip()
+        is_similar = expected in predicted or predicted in expected
+        
+        return jsonify({
+            'roberta_answer': result['answer'],
+            'confidence': result['score'],
+            'expected_answer': expected_answer,
+            'is_similar': is_similar,
+            'quality_score': result['score'] if is_similar else 0
+        })
+        
+    except Exception as e:
+        return jsonify({'error': f'Validation failed: {str(e)}'}), 500
 
 
 if __name__ == '__main__':
