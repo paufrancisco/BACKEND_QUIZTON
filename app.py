@@ -4,11 +4,13 @@ import PyPDF2
 import random
 
 app = Flask(__name__)
+
 CORS(app, origins=[
     "http://127.0.0.1:5500",
     "https://sample-render-hosting-1.onrender.com",
     "https://paufrancisco.github.io",
-    "https://quizton-lake.vercel.app"
+    "https://quizton-lake.vercel.app",
+    "https://68ba7f56b0ec0e1c7f607a72--superquizton.netlify.app"  
 ])
 
 def romanize(num):
