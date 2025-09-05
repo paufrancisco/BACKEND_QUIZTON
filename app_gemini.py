@@ -11,13 +11,51 @@ import os
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app, origins=[
-    "http://127.0.0.1:5500",
-    "https://sample-render-hosting-1.onrender.com",
-    "https://paufrancisco.github.io",
-    "https://quizton-lake.vercel.app",
-    "https://68ba7f56b0ec0e1c7f607a72--superquizton.netlify.app"  
-])
+
+# Updated CORS configuration to handle dynamic Netlify URLs
+CORS(app, 
+     origins=[
+         "http://127.0.0.1:5500",
+         "https://sample-render-hosting-1.onrender.com",
+         "https://paufrancisco.github.io",
+         "https://quizton-lake.vercel.app",
+     ],
+     methods=['GET', 'POST', 'OPTIONS'],
+     allow_headers=['Content-Type', 'Authorization'],
+     supports_credentials=True
+)
+
+# Add explicit preflight handling for OPTIONS requests
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        response = jsonify()
+        response.headers.add("Access-Control-Allow-Origin", "*")
+        response.headers.add('Access-Control-Allow-Headers', "*")
+        response.headers.add('Access-Control-Allow-Methods', "*")
+        return response
+
+# Add CORS headers to all responses with dynamic origin support
+@app.after_request
+def after_request(response):
+    origin = request.headers.get('Origin')
+    
+    # List of explicitly allowed origins
+    allowed_origins = [
+        "http://127.0.0.1:5500",
+        "https://sample-render-hosting-1.onrender.com",
+        "https://paufrancisco.github.io",
+        "https://quizton-lake.vercel.app",
+    ]
+    
+    # Allow the origin if it's in our list OR if it's a netlify.app or vercel.app domain
+    if origin in allowed_origins or (origin and (origin.endswith('.netlify.app') or origin.endswith('.vercel.app'))):
+        response.headers.add('Access-Control-Allow-Origin', origin)
+    
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    response.headers.add('Access-Control-Allow-Credentials', 'true')
+    return response
 
 # Initialize Gemini client
 api_key = os.getenv("GEMINI_API_KEY")
