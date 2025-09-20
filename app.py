@@ -236,6 +236,257 @@ def health():
 
 
 
+###############################################################################################################################
+############################## REPHRASE POST ##################################################################################
+###############################################################################################################################
+@app.route('/rephrase', methods=['POST'])
+def rephrase_question():
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({'success': False, 'error': 'No data provided'}), 400
+        
+        action = data.get('action')  # 'rephrase' or 'regenerate'
+        current_question = data.get('question')
+        question_type = data.get('question_type', 'multiple-choice')
+        difficulty = data.get('difficulty', 'medium')
+        current_choices = data.get('current_choices', {})
+        current_correct_answer = data.get('current_correct_answer', '')
+        
+        if not action or not current_question:
+            return jsonify({'success': False, 'error': 'Missing required fields'}), 400
+        
+        # Use Gemini to rephrase or regenerate
+        if model:
+            if action == 'rephrase':
+                result = rephrase_with_gemini(current_question, question_type, difficulty, current_choices, current_correct_answer)
+            else:  # regenerate
+                result = regenerate_with_gemini(question_type, difficulty)
+        else:
+            # Fallback if Gemini is not available
+            result = generate_fallback_rephrase(action, current_question, question_type, current_choices, current_correct_answer)
+        
+        return jsonify({
+            'success': True,
+            'data': result
+        })
+        
+    except Exception as e:
+        print(f"Error in rephrase endpoint: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+###############################################################################################################################
+############################## REPHRASE POST ##################################################################################
+###############################################################################################################################
+
+
+
+
+###############################################################################################################################
+############################## REPHRASE with GEMINI ###########################################################################
+###############################################################################################################################
+
+
+def rephrase_with_gemini(question, question_type, difficulty, current_choices, current_answer):
+    """Rephrase question while keeping the same answer"""
+    try:
+        if question_type == 'multiple-choice':
+            prompt = f"""
+            Rephrase the following multiple-choice question while keeping the same correct answer and concept.
+            The difficulty should remain: {difficulty}
+            
+            Original question: {question}
+            Current choices: {current_choices}
+            Correct answer: {current_answer}
+            
+            Requirements:
+            - Keep the same correct answer ({current_answer})
+            - Keep the same concept but rephrase the question differently
+            - Maintain difficulty level: {difficulty}
+            - Provide 4 choices (A-D)
+            
+            Format as JSON:
+            {{
+                "question": "rephrased question text",
+                "choices": {{"A": "choice A", "B": "choice B", "C": "choice C", "D": "choice D"}},
+                "correct_answer": "{current_answer}"
+            }}
+            """
+        elif question_type == 'true-false':
+            prompt = f"""
+            Rephrase the following true/false question while keeping the same correct answer.
+            The difficulty should remain: {difficulty}
+            
+            Original question: {question}
+            Correct answer: {current_answer}
+            
+            Requirements:
+            - Keep the same correct answer ({current_answer})
+            - Rephrase the statement differently but maintain the same truth value
+            - Maintain difficulty level: {difficulty}
+            
+            Format as JSON:
+            {{
+                "question": "rephrased question text",
+                "correct_answer": "{current_answer}"
+            }}
+            """
+        else:  # fill-blank
+            prompt = f"""
+            Rephrase the following fill-in-the-blank question while keeping the same answer.
+            The difficulty should remain: {difficulty}
+            
+            Original question: {question}
+            Correct answer: {current_answer}
+            
+            Requirements:
+            - Keep the same answer ({current_answer})
+            - Rephrase the question sentence differently but use ____ for the blank
+            - The blank should still be answered by: {current_answer}
+            - Maintain difficulty level: {difficulty}
+            
+            Format as JSON:
+            {{
+                "question": "rephrased question with ____",
+                "correct_answer": "{current_answer}"
+            }}
+            """
+        
+        response = model.generate_content(prompt)
+        response_text = response.text.strip().removeprefix("```json").removesuffix("```").strip()
+        return json.loads(response_text)
+        
+    except Exception as e:
+        print(f"Gemini rephrase error: {e}")
+        return generate_fallback_rephrase('rephrase', question, question_type, current_choices, current_answer)
+
+###############################################################################################################################
+############################## REPHRASE with GEMINI ###########################################################################
+###############################################################################################################################
+
+
+
+###############################################################################################################################
+############################## REGENERATE with GEMINI #########################################################################
+###############################################################################################################################
+
+
+def regenerate_with_gemini(question_type, difficulty):
+    """Generate completely new question and answer"""
+    try:
+        if question_type == 'multiple-choice':
+            prompt = f"""
+            Generate a new multiple-choice question with difficulty: {difficulty}.
+            
+            Requirements:
+            - Completely new question (not related to any previous content)
+            - 4 choices (A-D) with one correct answer
+            - Difficulty: {difficulty}
+            - Make it educational and meaningful
+            
+            Format as JSON:
+            {{
+                "question": "new question text",
+                "choices": {{"A": "choice A", "B": "choice B", "C": "choice C", "D": "choice D"}},
+                "correct_answer": "A"
+            }}
+            """
+        elif question_type == 'true-false':
+            prompt = f"""
+            Generate a new true/false question with difficulty: {difficulty}.
+            
+            Requirements:
+            - Completely new statement
+            - Difficulty: {difficulty}
+            - Make it educational and meaningful
+            
+            Format as JSON:
+            {{
+                "question": "new statement",
+                "correct_answer": "True"
+            }}
+            """
+        else:  # fill-blank
+            prompt = f"""
+            Generate a new fill-in-the-blank question with difficulty: {difficulty}.
+            
+            Requirements:
+            - Completely new question with ____
+            - Difficulty: {difficulty}
+            - Make it educational and meaningful
+            
+            Format as JSON:
+            {{
+                "question": "new question with ____",
+                "correct_answer": "answer for the blank"
+            }}
+            """
+        
+        response = model.generate_content(prompt)
+        response_text = response.text.strip().removeprefix("```json").removesuffix("```").strip()
+        return json.loads(response_text)
+        
+    except Exception as e:
+        print(f"Gemini regenerate error: {e}")
+        return generate_fallback_rephrase('regenerate', '', question_type, {}, '')
+
+
+###############################################################################################################################
+############################## REGENERATE with GEMINI #########################################################################
+###############################################################################################################################
+
+
+
+
+###############################################################################################################################
+############################## FALLBACK REPHRASE  #############################################################################
+###############################################################################################################################
+
+
+
+def generate_fallback_rephrase(action, question, question_type, current_choices, current_answer):
+    """Fallback function when Gemini is not available"""
+    if action == 'rephrase':
+        if question_type == 'multiple-choice':
+            return {
+                "question": f"Rephrased: {question}",
+                "choices": current_choices,
+                "correct_answer": current_answer
+            }
+        elif question_type == 'true-false':
+            return {
+                "question": f"Rephrased: {question}",
+                "correct_answer": current_answer
+            }
+        else:  # fill-blank
+            return {
+                "question": question.replace('____', '______'),
+                "correct_answer": current_answer
+            }
+    else:  # regenerate
+        fallback_questions = {
+            'multiple-choice': {
+                "question": "What is 2 + 2?",
+                "choices": {"A": "3", "B": "4", "C": "5", "D": "6"},
+                "correct_answer": "B"
+            },
+            'true-false': {
+                "question": "The sun rises in the east.",
+                "correct_answer": "True"
+            },
+            'fill-blank': {
+                "question": "The capital of France is ____.",
+                "correct_answer": "Paris"
+            }
+        }
+        return fallback_questions.get(question_type, fallback_questions['multiple-choice'])
+
+###############################################################################################################################
+############################## FALLBACK REPHRASE  #############################################################################
+###############################################################################################################################
+
+
+
 
 
 #############################################################################
