@@ -39,16 +39,35 @@ CORS(
 #############################################################################
 
 api_key = os.getenv("GEMINI_API_KEY")
+backup_api_key = os.getenv("GEMINI_API_KEY2")
 model = None
-if api_key:
+
+# Try backup key FIRST for testing
+if backup_api_key:
     try:
-        genai.configure(api_key=api_key)
+        genai.configure(api_key=backup_api_key)  # ✅ Fixed: use backup_api_key
         model = genai.GenerativeModel('gemini-2.0-flash')
-        print("Gemini client initialized ✅")
+        print("Gemini client initialized with backup key (GEMINI_API_KEY2) ✅")
     except Exception as e:
-        print(f"Error initializing Gemini: {e}")
+        print(f"Error with backup key: {e}")
+        if api_key:
+            try:
+                genai.configure(api_key=api_key)  # ✅ Fixed: use api_key
+                model = genai.GenerativeModel('gemini-2.0-flash')
+                print("Gemini client initialized with primary key ✅")
+            except Exception as e2:
+                print(f"Error with primary key: {e2}")
+        else:
+            print("⚠️ No primary key available")
+elif api_key:
+    try:
+        genai.configure(api_key=api_key)  # ✅ Fixed: use api_key
+        model = genai.GenerativeModel('gemini-2.0-flash')
+        print("Gemini client initialized with primary key ✅")
+    except Exception as e:
+        print(f"Error initializing Gemini with primary key: {e}")
 else:
-    print("⚠️ GEMINI_API_KEY not found in environment variables")
+    print("⚠️ No GEMINI_API_KEY or GEMINI_API_KEY2 found in environment variables")
 #############################################################################
 ################### Initialize Gemini client ################################
 #############################################################################
