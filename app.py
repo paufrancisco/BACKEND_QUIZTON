@@ -45,14 +45,14 @@ model = None
 # Try backup key FIRST for testing
 if backup_api_key:
     try:
-        genai.configure(api_key=backup_api_key)  # ✅ Fixed: use backup_api_key
+        genai.configure(api_key=backup_api_key)
         model = genai.GenerativeModel('gemini-2.0-flash')
         print("Gemini client initialized with backup key (GEMINI_API_KEY2) ✅")
     except Exception as e:
         print(f"Error with backup key: {e}")
         if api_key:
             try:
-                genai.configure(api_key=api_key)  # ✅ Fixed: use api_key
+                genai.configure(api_key=api_key)
                 model = genai.GenerativeModel('gemini-2.0-flash')
                 print("Gemini client initialized with primary key ✅")
             except Exception as e2:
@@ -61,7 +61,7 @@ if backup_api_key:
             print("⚠️ No primary key available")
 elif api_key:
     try:
-        genai.configure(api_key=api_key)  # ✅ Fixed: use api_key
+        genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-2.0-flash')
         print("Gemini client initialized with primary key ✅")
     except Exception as e:
@@ -75,7 +75,7 @@ else:
 
 
 #############################################################################
-########################### UTITLITY ########################################
+########################### UTILITY ########################################
 #############################################################################
 def romanize(num):
     roman_numerals = ['I', 'II', 'III']
@@ -109,7 +109,7 @@ def simple_rephrase_fallback(question: str) -> str:
     # Try word replacements
     for old, new in replacements.items():
         if old in rephrased:
-            rephrased = rephrased.replace(old, new, 1)  # Replace only first occurrence
+            rephrased = rephrased.replace(old, new, 1)
             break
     
     # If no changes made, add variation
@@ -120,8 +120,73 @@ def simple_rephrase_fallback(question: str) -> str:
             rephrased = f"Please clarify: {question}"
     
     return rephrased
+
+
+def extract_text_with_pages(pdf_reader):
+    """Extract text from PDF and track which page each section came from"""
+    pages_data = []
+    for page_num, page in enumerate(pdf_reader.pages, 1):
+        text = page.extract_text() or ''
+        if text.strip():
+            pages_data.append({
+                'page_number': page_num,
+                'text': text.strip()
+            })
+    return pages_data
+
+
+def find_source_page(source_text, pages_data):
+    """Find which page the source content came from - EXACT PHRASE MATCHING"""
+    if not source_text or not pages_data:
+        return 1
+    
+    # Normalize text
+    source_lower = source_text.lower().strip()
+    
+    # Try to find exact phrase match
+    for page_data in pages_data:
+        page_text_lower = page_data['text'].lower()
+        
+        # Take first 30 characters and last 30 characters of source
+        if len(source_lower) > 60:
+            first_part = source_lower[:30]
+            last_part = source_lower[-30:]
+            
+            # If both parts appear in the page, it's likely the right page
+            if first_part in page_text_lower and last_part in page_text_lower:
+                print(f"✅ Exact match found on page {page_data['page_number']}")
+                return page_data['page_number']
+        else:
+            # For shorter sources, check if most of it appears
+            if source_lower in page_text_lower:
+                print(f"✅ Exact match found on page {page_data['page_number']}")
+                return page_data['page_number']
+    
+    # Fallback: word-based matching
+    import re
+    source_words = re.findall(r'\b\w{4,}\b', source_lower)  # Words with 4+ chars
+    
+    if source_words:
+        best_page = 1
+        best_count = 0
+        
+        for page_data in pages_data:
+            page_text_lower = page_data['text'].lower()
+            count = sum(1 for word in source_words if word in page_text_lower)
+            
+            if count > best_count:
+                best_count = count
+                best_page = page_data['page_number']
+        
+        match_ratio = best_count / len(source_words) if source_words else 0
+        if match_ratio > 0.3:  # If at least 30% of words match
+            print(f"📄 Best match on page {best_page} ({match_ratio*100:.1f}% words matched)")
+            return best_page
+    
+    print(f"⚠️ No good match found, defaulting to page 1")
+    return 1
 #############################################################################
-########################### UTITLITY ########################################
+########################### UTILITY ########################################
 #############################################################################
 
 
@@ -131,56 +196,138 @@ def simple_rephrase_fallback(question: str) -> str:
 ######################################################################################################################################
 ####################################### Question generation ##########################################################################
 ######################################################################################################################################
-def generate_questions_with_gemini(text, question_type, difficulty, num_questions):
+
+
+def generate_questions_with_gemini(text, question_type, difficulty, num_questions, pages_data=None):
+    """Generate questions with source content tracking - IMPROVED TO USE FULL PDF"""
     if not model:
         return generate_fallback_questions(question_type, num_questions)
 
+    # IMPORTANT: Use more text from the PDF (up to 30000 chars instead of 3000)
+    # This ensures questions come from different pages
+    text_chunk = text[:30000]  # Increased from 3000 to 30000
+    
+    # If we have multiple pages, include text from different pages
+    page_samples = ""
+    if pages_data and len(pages_data) > 1:
+        # Sample from beginning, middle, and end pages
+        sample_pages = []
+        if len(pages_data) >= 3:
+            sample_pages = [pages_data[0], pages_data[len(pages_data)//2], pages_data[-1]]
+        else:
+            sample_pages = pages_data
+        
+        page_samples = "\n\n--- PAGE SAMPLES ---\n"
+        for page in sample_pages:
+            page_samples += f"\n[Page {page['page_number']}]:\n{page['text'][:800]}\n"
+
     if question_type == 'multiple-choice':
         prompt = f"""
-        Based on the following text, generate {num_questions} multiple-choice questions with difficulty level: {difficulty}.
-        Text: {text[:3000]}
+        Based on the following text from a multi-page document, generate {num_questions} multiple-choice questions with difficulty level: {difficulty}.
+        
+        IMPORTANT: Create questions from DIFFERENT parts of the document, not just the beginning.
+        
+        Full Text (first 30,000 characters):
+        {text_chunk}
+        
+        {page_samples}
+        
         Requirements:
-        - {num_questions} questions only
+        - Generate EXACTLY {num_questions} questions
         - Difficulty: {difficulty}
         - Each question has 4 choices (A–D) and a correct answer
+        - CRITICAL: Include "source_content" field with the EXACT 2-3 sentence excerpt from the text that the question is based on
+        - Spread questions across different sections of the document
+        
         Format strictly as JSON array:
-        [{{"question": "...","choices": {{"A":"...","B":"...","C":"...","D":"..."}},"correct_answer":"A"}}]
+        [{{
+            "question": "...",
+            "choices": {{"A":"...","B":"...","C":"...","D":"..."}},
+            "correct_answer":"A",
+            "source_content": "The exact 2-3 sentences from the text that this question is based on"
+        }}]
         """
     elif question_type == 'true-false':
         prompt = f"""
-        Based on the following text, generate {num_questions} true/false questions with difficulty {difficulty}.
-        Text: {text[:3000]}
+        Based on the following text from a multi-page document, generate {num_questions} true/false questions with difficulty {difficulty}.
+        
+        IMPORTANT: Create questions from DIFFERENT parts of the document, not just the beginning.
+        
+        Full Text (first 30,000 characters):
+        {text_chunk}
+        
+        {page_samples}
+        
         Requirements:
-        - {num_questions} questions only
+        - Generate EXACTLY {num_questions} questions
         - Each with a statement + correct answer (True/False)
+        - CRITICAL: Include "source_content" field with the EXACT 2-3 sentence excerpt from the text
+        - Spread questions across different sections of the document
+        
         Format strictly as JSON array:
-        [{{"question": "...","correct_answer":"True"}}]
+        [{{
+            "question": "...",
+            "correct_answer":"True",
+            "source_content": "The exact 2-3 sentences from the text that this question is based on"
+        }}]
         """
     else:  # fill-blank
         prompt = f"""
-        Based on the following text, generate {num_questions} fill-in-the-blank questions with difficulty {difficulty}.
-        Text: {text[:3000]}
+        Based on the following text from a multi-page document, generate {num_questions} fill-in-the-blank questions with difficulty {difficulty}.
+        
+        IMPORTANT: Create questions from DIFFERENT parts of the document, not just the beginning.
+        
+        Full Text (first 30,000 characters):
+        {text_chunk}
+        
+        {page_samples}
+        
         Requirements:
-        - {num_questions} questions only
+        - Generate EXACTLY {num_questions} questions
         - Use ____ for blanks
-        - Provide the correct answer for each blank in the "correct_answer" field
+        - Provide the correct answer for each blank
+        - CRITICAL: Include "source_content" field with the EXACT 2-3 sentence excerpt from the text
+        - Spread questions across different sections of the document
+        
         Format strictly as JSON array:
-        [
-        {{
+        [{{
             "question": "The ____ ...",
-            "correct_answer": "the correct word or phrase that fills the blank"
-        }}
-        ]
+            "correct_answer": "the correct word or phrase",
+            "source_content": "The exact 2-3 sentences from the text that this question is based on"
+        }}]
         """
 
     try:
         response = model.generate_content(prompt)
         response_text = response.text.strip().removeprefix("```json").removesuffix("```").strip()
-        return json.loads(response_text)
+        questions = json.loads(response_text)
+        
+        # Add source page information
+        if pages_data:
+            print(f"\n📚 Matching questions to {len(pages_data)} pages...")
+            for idx, q in enumerate(questions, 1):
+                source_content = q.get('source_content', '')
+                if source_content and len(source_content) > 10:
+                    page_num = find_source_page(source_content, pages_data)
+                    q['source_page'] = page_num
+                    print(f"  Q{idx}: Matched to page {page_num}")
+                else:
+                    q['source_content'] = 'Source content not provided by AI'
+                    q['source_page'] = 1
+                    print(f"  Q{idx}: No source content provided")
+        else:
+            for q in questions:
+                if 'source_content' not in q:
+                    q['source_content'] = 'Source tracking not available'
+                if 'source_page' not in q:
+                    q['source_page'] = 1
+        
+        return questions
     except Exception as e:
         print(f"Gemini error: {e}")
+        import traceback
+        traceback.print_exc()
         return generate_fallback_questions(question_type, num_questions)
-
 
 def rephrase_question_with_gemini(question, difficulty="medium", question_type="multiple-choice"):
     """Rephrase a question using Gemini AI"""
@@ -209,7 +356,6 @@ def rephrase_question_with_gemini(question, difficulty="medium", question_type="
         response = model.generate_content(prompt)
         rephrased = response.text.strip()
         
-      
         if rephrased.startswith('"') and rephrased.endswith('"'):
             rephrased = rephrased[1:-1]
          
@@ -317,23 +463,30 @@ def generate_fallback_single_question(question_type, difficulty):
 #################### Generate Fallback Questions  ###################################################
 #####################################################################################################
 def generate_fallback_questions(question_type, num_questions):
+    """Generate fallback questions with source content"""
     questions = []
     for i in range(1, num_questions + 1):
         if question_type == 'multiple-choice':
             questions.append({
-                "question": f"Sample MCQ {i} (fallback)",
+                "question": f"Sample MCQ {i} (fallback mode - Gemini unavailable)",
                 "choices": {"A": "Option A", "B": "Option B", "C": "Option C", "D": "Option D"},
-                "correct_answer": random.choice(["A", "B", "C", "D"])
+                "correct_answer": random.choice(["A", "B", "C", "D"]),
+                "source_content": "This is a fallback question generated when AI is unavailable. Source tracking requires Gemini AI.",
+                "source_page": 1
             })
         elif question_type == 'true-false':
             questions.append({
-                "question": f"Sample True/False {i} (fallback)",
-                "correct_answer": random.choice(["True", "False"])
+                "question": f"Sample True/False {i} (fallback mode - Gemini unavailable)",
+                "correct_answer": random.choice(["True", "False"]),
+                "source_content": "This is a fallback question generated when AI is unavailable. Source tracking requires Gemini AI.",
+                "source_page": 1
             })
         else:
             questions.append({
-                "question": f"Fill in the blank {i}: ____ (fallback)",
-                "correct_answer": f"Answer{i}"
+                "question": f"Fill in the blank {i}: The ____ is important (fallback mode)",
+                "correct_answer": f"Answer{i}",
+                "source_content": "This is a fallback question generated when AI is unavailable. Source tracking requires Gemini AI.",
+                "source_page": 1
             })
     return questions
 #####################################################################################################
@@ -353,7 +506,10 @@ def convert():
 
     try:
         pdf_reader = PyPDF2.PdfReader(file)
-        text = ''.join([page.extract_text() or '' for page in pdf_reader.pages])
+        
+        # Extract text with page tracking
+        pages_data = extract_text_with_pages(pdf_reader)
+        text = ' '.join([page['text'] for page in pages_data])
 
         if not text.strip():
             return jsonify({'error': 'No text could be extracted from PDF'}), 400
@@ -366,26 +522,39 @@ def convert():
             difficulty = request.form.get(f'set-{i}-difficulty', 'easy')
             question_type = request.form.get(f'set-{i}-question-type', 'multiple-choice')
 
-            generated_questions = generate_questions_with_gemini(text, question_type, difficulty, set_questions)
+            # Generate questions with source tracking
+            generated_questions = generate_questions_with_gemini(
+                text, question_type, difficulty, set_questions, pages_data
+            )
 
             questions, answers = [], []
             for idx, q in enumerate(generated_questions[:set_questions], 1):
+                question_data = {
+                    "number": idx,
+                    "question": q["question"],
+                    "source_content": q.get("source_content", "Source content not available"),
+                    "source_page": q.get("source_page", 1)
+                }
+                
                 if question_type == 'multiple-choice':
-                    questions.append({"number": idx, "question": q["question"], "choices": q["choices"]})
+                    question_data["choices"] = q["choices"]
                     answers.append(f"{idx}. {q['correct_answer']}")
                 elif question_type == 'true-false':
-                    questions.append({"number": idx, "question": q["question"], "choices": {"True": "True", "False": "False"}})
+                    question_data["choices"] = {"True": "True", "False": "False"}
                     answers.append(f"{idx}. {q['correct_answer']}")
                 else:
-                    questions.append({"number": idx, "question": q["question"], "choices": {}})
+                    question_data["choices"] = {}
                     answers.append(f"{idx}. {q['correct_answer']}")
+                
+                questions.append(question_data)
 
             sets.append({
                 "set": f"Part {romanize(i)}",
                 "difficulty": difficulty,
                 "question_type": question_type,
                 "questions": questions,
-                "key_to_correction": answers
+                "key_to_correction": answers,
+                "numberOfQuestions": len(questions)
             })
 
         return jsonify({
@@ -396,6 +565,9 @@ def convert():
             }
         })
     except Exception as e:
+        print(f"Error in /convert: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': f'An error occurred: {str(e)}'}), 500
 
 
