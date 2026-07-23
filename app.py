@@ -36,7 +36,7 @@ CORS(
 #############################################################################
 ################### Config: tune these if you still see timeouts ###########
 #############################################################################
-GEMINI_REQUEST_TIMEOUT = 60      # seconds, per Gemini API call
+GEMINI_REQUEST_TIMEOUT = 60      # seconds, per Gemini API call (currently unused - see note below)
 MAX_PROMPT_CHARS = 10000         # was 30000 - smaller prompt = faster response
 PAGE_SAMPLE_CHARS = 500          # was 800 - trimmed per-page sample size
 #############################################################################
@@ -305,12 +305,12 @@ def generate_questions_with_gemini(text, question_type, difficulty, num_question
         """
 
     try:
-        # request_options timeout prevents this call from hanging past
-        # gunicorn's worker timeout and getting SIGKILL'd
-        response = model.generate_content(
-            prompt,
-            request_options={"timeout": GEMINI_REQUEST_TIMEOUT}
-        )
+        # NOTE: request_options={"timeout": ...} was removed here because the
+        # installed google-generativeai version no longer accepts it as a
+        # valid kwarg on generate_content() - it was being forwarded into
+        # GenerateContentRequest which has no such field, causing every
+        # call to fail and silently fall back to generate_fallback_questions().
+        response = model.generate_content(prompt)
         response_text = response.text.strip().removeprefix("```json").removesuffix("```").strip()
         questions = json.loads(response_text)
 
@@ -366,10 +366,8 @@ def rephrase_question_with_gemini(question, difficulty="medium", question_type="
         Rephrased question:
         """
 
-        response = model.generate_content(
-            prompt,
-            request_options={"timeout": GEMINI_REQUEST_TIMEOUT}
-        )
+        # request_options removed - see note in generate_questions_with_gemini
+        response = model.generate_content(prompt)
         rephrased = response.text.strip()
 
         if rephrased.startswith('"') and rephrased.endswith('"'):
@@ -437,10 +435,8 @@ def regenerate_question_with_gemini(original_question, context="", difficulty="m
             - Return only valid JSON, nothing else
             """
 
-        response = model.generate_content(
-            prompt,
-            request_options={"timeout": GEMINI_REQUEST_TIMEOUT}
-        )
+        # request_options removed - see note in generate_questions_with_gemini
+        response = model.generate_content(prompt)
         response_text = response.text.strip().removeprefix("```json").removesuffix("```").strip()
 
         return json.loads(response_text)
