@@ -23,8 +23,8 @@ CORS(
         "https://paufrancisco.github.io",
         "https://quizton-lake.vercel.app",
         "https://sample-render-hosting-1.onrender.com",
-        r"https://.*\.netlify\.app",  
-        r"https://.*\.vercel\.app"     
+        r"https://.*\.netlify\.app",
+        r"https://.*\.vercel\.app"
     ]}},
     supports_credentials=True
 )
@@ -32,6 +32,14 @@ CORS(
 ######## Simplified CORS config (supports Netlify + Vercel + local dev)######
 #############################################################################
 
+
+#############################################################################
+################### Config: tune these if you still see timeouts ###########
+#############################################################################
+GEMINI_REQUEST_TIMEOUT = 60      # seconds, per Gemini API call
+MAX_PROMPT_CHARS = 10000         # was 30000 - smaller prompt = faster response
+PAGE_SAMPLE_CHARS = 500          # was 800 - trimmed per-page sample size
+#############################################################################
 
 
 #############################################################################
@@ -71,7 +79,7 @@ else:
 #############################################################################
 ################### Initialize Gemini client ################################
 #############################################################################
-    
+
 
 
 #############################################################################
@@ -84,7 +92,7 @@ def romanize(num):
 
 def simple_rephrase_fallback(question: str) -> str:
     """Simple rule-based rephrasing when Gemini model isn't available"""
-    
+
     # Dictionary of simple word replacements
     replacements = {
         'What is': 'What does',
@@ -102,23 +110,23 @@ def simple_rephrase_fallback(question: str) -> str:
         'explain': 'describe',
         'describe': 'define'
     }
-    
+
     # Apply simple transformations
     rephrased = question
-    
+
     # Try word replacements
     for old, new in replacements.items():
         if old in rephrased:
             rephrased = rephrased.replace(old, new, 1)
             break
-    
+
     # If no changes made, add variation
     if rephrased == question:
         if question.endswith('?'):
             rephrased = f"Can you explain: {question[:-1]}?"
         else:
             rephrased = f"Please clarify: {question}"
-    
+
     return rephrased
 
 
@@ -139,19 +147,19 @@ def find_source_page(source_text, pages_data):
     """Find which page the source content came from - EXACT PHRASE MATCHING"""
     if not source_text or not pages_data:
         return 1
-    
+
     # Normalize text
     source_lower = source_text.lower().strip()
-    
+
     # Try to find exact phrase match
     for page_data in pages_data:
         page_text_lower = page_data['text'].lower()
-        
+
         # Take first 30 characters and last 30 characters of source
         if len(source_lower) > 60:
             first_part = source_lower[:30]
             last_part = source_lower[-30:]
-            
+
             # If both parts appear in the page, it's likely the right page
             if first_part in page_text_lower and last_part in page_text_lower:
                 print(f"✅ Exact match found on page {page_data['page_number']}")
@@ -161,34 +169,33 @@ def find_source_page(source_text, pages_data):
             if source_lower in page_text_lower:
                 print(f"✅ Exact match found on page {page_data['page_number']}")
                 return page_data['page_number']
-    
+
     # Fallback: word-based matching
     import re
     source_words = re.findall(r'\b\w{4,}\b', source_lower)  # Words with 4+ chars
-    
+
     if source_words:
         best_page = 1
         best_count = 0
-        
+
         for page_data in pages_data:
             page_text_lower = page_data['text'].lower()
             count = sum(1 for word in source_words if word in page_text_lower)
-            
+
             if count > best_count:
                 best_count = count
                 best_page = page_data['page_number']
-        
+
         match_ratio = best_count / len(source_words) if source_words else 0
         if match_ratio > 0.3:  # If at least 30% of words match
             print(f"📄 Best match on page {best_page} ({match_ratio*100:.1f}% words matched)")
             return best_page
-    
+
     print(f"⚠️ No good match found, defaulting to page 1")
     return 1
 #############################################################################
 ########################### UTILITY ########################################
 #############################################################################
-
 
 
 
@@ -203,10 +210,10 @@ def generate_questions_with_gemini(text, question_type, difficulty, num_question
     if not model:
         return generate_fallback_questions(question_type, num_questions)
 
-    # IMPORTANT: Use more text from the PDF (up to 30000 chars instead of 3000)
-    # This ensures questions come from different pages
-    text_chunk = text[:30000]  # Increased from 3000 to 30000
-    
+    # Trimmed from 30000 -> MAX_PROMPT_CHARS to reduce latency/memory and
+    # avoid gunicorn worker timeouts on large PDFs
+    text_chunk = text[:MAX_PROMPT_CHARS]
+
     # If we have multiple pages, include text from different pages
     page_samples = ""
     if pages_data and len(pages_data) > 1:
@@ -216,29 +223,29 @@ def generate_questions_with_gemini(text, question_type, difficulty, num_question
             sample_pages = [pages_data[0], pages_data[len(pages_data)//2], pages_data[-1]]
         else:
             sample_pages = pages_data
-        
+
         page_samples = "\n\n--- PAGE SAMPLES ---\n"
         for page in sample_pages:
-            page_samples += f"\n[Page {page['page_number']}]:\n{page['text'][:800]}\n"
+            page_samples += f"\n[Page {page['page_number']}]:\n{page['text'][:PAGE_SAMPLE_CHARS]}\n"
 
     if question_type == 'multiple-choice':
         prompt = f"""
         Based on the following text from a multi-page document, generate {num_questions} multiple-choice questions with difficulty level: {difficulty}.
-        
+
         IMPORTANT: Create questions from DIFFERENT parts of the document, not just the beginning.
-        
-        Full Text (first 30,000 characters):
+
+        Text excerpt:
         {text_chunk}
-        
+
         {page_samples}
-        
+
         Requirements:
         - Generate EXACTLY {num_questions} questions
         - Difficulty: {difficulty}
         - Each question has 4 choices (A–D) and a correct answer
         - CRITICAL: Include "source_content" field with the EXACT 2-3 sentence excerpt from the text that the question is based on
         - Spread questions across different sections of the document
-        
+
         Format strictly as JSON array:
         [{{
             "question": "...",
@@ -250,20 +257,20 @@ def generate_questions_with_gemini(text, question_type, difficulty, num_question
     elif question_type == 'true-false':
         prompt = f"""
         Based on the following text from a multi-page document, generate {num_questions} true/false questions with difficulty {difficulty}.
-        
+
         IMPORTANT: Create questions from DIFFERENT parts of the document, not just the beginning.
-        
-        Full Text (first 30,000 characters):
+
+        Text excerpt:
         {text_chunk}
-        
+
         {page_samples}
-        
+
         Requirements:
         - Generate EXACTLY {num_questions} questions
         - Each with a statement + correct answer (True/False)
         - CRITICAL: Include "source_content" field with the EXACT 2-3 sentence excerpt from the text
         - Spread questions across different sections of the document
-        
+
         Format strictly as JSON array:
         [{{
             "question": "...",
@@ -274,21 +281,21 @@ def generate_questions_with_gemini(text, question_type, difficulty, num_question
     else:  # fill-blank
         prompt = f"""
         Based on the following text from a multi-page document, generate {num_questions} fill-in-the-blank questions with difficulty {difficulty}.
-        
+
         IMPORTANT: Create questions from DIFFERENT parts of the document, not just the beginning.
-        
-        Full Text (first 30,000 characters):
+
+        Text excerpt:
         {text_chunk}
-        
+
         {page_samples}
-        
+
         Requirements:
         - Generate EXACTLY {num_questions} questions
         - Use ____ for blanks
         - Provide the correct answer for each blank
         - CRITICAL: Include "source_content" field with the EXACT 2-3 sentence excerpt from the text
         - Spread questions across different sections of the document
-        
+
         Format strictly as JSON array:
         [{{
             "question": "The ____ ...",
@@ -298,10 +305,15 @@ def generate_questions_with_gemini(text, question_type, difficulty, num_question
         """
 
     try:
-        response = model.generate_content(prompt)
+        # request_options timeout prevents this call from hanging past
+        # gunicorn's worker timeout and getting SIGKILL'd
+        response = model.generate_content(
+            prompt,
+            request_options={"timeout": GEMINI_REQUEST_TIMEOUT}
+        )
         response_text = response.text.strip().removeprefix("```json").removesuffix("```").strip()
         questions = json.loads(response_text)
-        
+
         # Add source page information
         if pages_data:
             print(f"\n📚 Matching questions to {len(pages_data)} pages...")
@@ -321,7 +333,7 @@ def generate_questions_with_gemini(text, question_type, difficulty, num_question
                     q['source_content'] = 'Source tracking not available'
                 if 'source_page' not in q:
                     q['source_page'] = 1
-        
+
         return questions
     except Exception as e:
         print(f"Gemini error: {e}")
@@ -329,43 +341,47 @@ def generate_questions_with_gemini(text, question_type, difficulty, num_question
         traceback.print_exc()
         return generate_fallback_questions(question_type, num_questions)
 
+
 def rephrase_question_with_gemini(question, difficulty="medium", question_type="multiple-choice"):
     """Rephrase a question using Gemini AI"""
     if not model:
         print("Gemini model not available, using fallback")
         return simple_rephrase_fallback(question)
-    
+
     try:
         prompt = f"""
         Rephrase the following question while maintaining its meaning and difficulty level ({difficulty}).
-        
+
         Original question: {question}
         Question type: {question_type}
         Difficulty: {difficulty}
-        
+
         Requirements:
         - Keep the same meaning and answer
         - Maintain {difficulty} difficulty level
         - Use different wording/structure
         - If it's a {question_type} question, keep the same format
         - Return only the rephrased question, nothing else
-        
+
         Rephrased question:
         """
-        
-        response = model.generate_content(prompt)
+
+        response = model.generate_content(
+            prompt,
+            request_options={"timeout": GEMINI_REQUEST_TIMEOUT}
+        )
         rephrased = response.text.strip()
-        
+
         if rephrased.startswith('"') and rephrased.endswith('"'):
             rephrased = rephrased[1:-1]
-         
+
         if question.endswith('?') and not rephrased.endswith('?'):
             rephrased += '?'
         elif question.endswith(':') and not rephrased.endswith(':'):
             rephrased += ':'
-            
+
         return rephrased if rephrased != question else simple_rephrase_fallback(question)
-        
+
     except Exception as e:
         print(f"Gemini rephrase error: {e}, using fallback")
         return simple_rephrase_fallback(question)
@@ -375,16 +391,16 @@ def regenerate_question_with_gemini(original_question, context="", difficulty="m
     """Regenerate a completely new question using Gemini AI"""
     if not model:
         return generate_fallback_single_question(question_type, difficulty)
-    
+
     try:
         if question_type == 'multiple-choice':
             prompt = f"""
             Generate a new multiple-choice question different from the original but with similar difficulty.
-            
+
             Original question: {original_question}
             Context/Topic: {context if context else "Based on the original question's topic"}
             Difficulty: {difficulty}
-            
+
             Requirements:
             - Create a completely different question on a similar topic
             - Difficulty level: {difficulty}
@@ -394,11 +410,11 @@ def regenerate_question_with_gemini(original_question, context="", difficulty="m
         elif question_type == 'true-false':
             prompt = f"""
             Generate a new true/false question different from the original but with similar difficulty.
-            
+
             Original question: {original_question}
             Context/Topic: {context if context else "Based on the original question's topic"}
             Difficulty: {difficulty}
-            
+
             Requirements:
             - Create a completely different question on a similar topic
             - Difficulty level: {difficulty}
@@ -408,11 +424,11 @@ def regenerate_question_with_gemini(original_question, context="", difficulty="m
         else:  # fill-blank
             prompt = f"""
             Generate a new fill-in-the-blank question different from the original but with similar difficulty.
-            
+
             Original question: {original_question}
             Context/Topic: {context if context else "Based on the original question's topic"}
             Difficulty: {difficulty}
-            
+
             Requirements:
             - Create a completely different question on a similar topic
             - Use ____ for blanks
@@ -420,12 +436,15 @@ def regenerate_question_with_gemini(original_question, context="", difficulty="m
             - Format as JSON: {{"question": "...","correct_answer":"..."}}
             - Return only valid JSON, nothing else
             """
-        
-        response = model.generate_content(prompt)
+
+        response = model.generate_content(
+            prompt,
+            request_options={"timeout": GEMINI_REQUEST_TIMEOUT}
+        )
         response_text = response.text.strip().removeprefix("```json").removesuffix("```").strip()
-        
+
         return json.loads(response_text)
-        
+
     except Exception as e:
         print(f"Gemini regenerate error: {e}, using fallback")
         return generate_fallback_single_question(question_type, difficulty)
@@ -453,12 +472,11 @@ def generate_fallback_single_question(question_type, difficulty):
 ######################################################################################################################################
 ####################################### Question generation ##########################################################################
 ######################################################################################################################################
-    
-    
-    
-    
-    
-    
+
+
+
+
+
 #####################################################################################################
 #################### Generate Fallback Questions  ###################################################
 #####################################################################################################
@@ -506,7 +524,7 @@ def convert():
 
     try:
         pdf_reader = PyPDF2.PdfReader(file)
-        
+
         # Extract text with page tracking
         pages_data = extract_text_with_pages(pdf_reader)
         text = ' '.join([page['text'] for page in pages_data])
@@ -535,7 +553,7 @@ def convert():
                     "source_content": q.get("source_content", "Source content not available"),
                     "source_page": q.get("source_page", 1)
                 }
-                
+
                 if question_type == 'multiple-choice':
                     question_data["choices"] = q["choices"]
                     answers.append(f"{idx}. {q['correct_answer']}")
@@ -545,7 +563,7 @@ def convert():
                 else:
                     question_data["choices"] = {}
                     answers.append(f"{idx}. {q['correct_answer']}")
-                
+
                 questions.append(question_data)
 
             sets.append({
@@ -594,13 +612,13 @@ def rephrase():
                 new_question = rephrase_question_with_gemini(question, difficulty, q_type)
                 print(f"Original: {question}")
                 print(f"Rephrased: {new_question}")
-                
+
                 return jsonify({
                     "question": new_question,
                     "answer": answer,
                     "choices": choices
                 })
-                
+
             except Exception as e:
                 print(f"Rephrase error: {e}")
                 return jsonify({"error": f"Rephrasing failed: {str(e)}"}), 500
@@ -608,24 +626,24 @@ def rephrase():
         elif action == "regenerate":
             try:
                 regenerated = regenerate_question_with_gemini(question, context, difficulty, q_type)
-                
+
                 if regenerated:
                     response_data = {
                         "question": regenerated["question"],
                         "answer": regenerated.get("correct_answer", regenerated.get("answer", ""))
                     }
-                    
+
                     if "choices" in regenerated and regenerated["choices"]:
                         choices_data = regenerated["choices"]
                         if isinstance(choices_data, dict):
                             response_data["choices"] = [f"{k}. {v}" for k, v in choices_data.items()]
                         else:
                             response_data["choices"] = choices_data
-                    
+
                     return jsonify(response_data)
                 else:
                     return jsonify({"error": "Could not regenerate this question"}), 400
-                    
+
             except Exception as e:
                 print(f"Regenerate error: {e}")
                 import traceback
@@ -643,11 +661,10 @@ def rephrase():
 ###############################################################################################################################
 ############################## Routes POST ####################################################################################
 ###############################################################################################################################
-    
-    
-    
-    
-    
+
+
+
+
 #############################################################################
 ############################## Routes GET ###################################
 #############################################################################
