@@ -46,14 +46,14 @@ model = None
 if backup_api_key:
     try:
         genai.configure(api_key=backup_api_key)
-        model = genai.GenerativeModel('gemini-3.6-flash')
+        model = genai.GenerativeModel('gemini-3.5-flash')
         print("Gemini client initialized with backup key (GEMINI_API_KEY2) ✅")
     except Exception as e:
         print(f"Error with backup key: {e}")
         if api_key:
             try:
                 genai.configure(api_key=api_key)
-                model = genai.GenerativeModel('gemini-3.6-flash')
+                model = genai.GenerativeModel('gemini-3.5-flash')
                 print("Gemini client initialized with primary key ✅")
             except Exception as e2:
                 print(f"Error with primary key: {e2}")
@@ -62,7 +62,7 @@ if backup_api_key:
 elif api_key:
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-3.6-flash')
+        model = genai.GenerativeModel('gemini-3.5-flash')
         print("Gemini client initialized with primary key ✅")
     except Exception as e:
         print(f"Error initializing Gemini with primary key: {e}")
